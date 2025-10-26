@@ -35,6 +35,29 @@ def get_ist_time():
     ist_time = utc_now + ist_offset
     return ist_time.strftime("%H:%M:%S")
 
+def get_current_expiry():
+    """Get current date in DDMMYY format"""
+    utc_now = datetime.now(timezone.utc)
+    ist_now = utc_now + timedelta(hours=5, minutes=30)
+    return ist_now.strftime("%d%m%y")
+
+def format_expiry_display(expiry_code):
+    """Convert DDMMYY to DD MMM YY format"""
+    try:
+        day = expiry_code[:2]
+        month = expiry_code[2:4]
+        year = "20" + expiry_code[4:6]
+        
+        month_names = {
+            '01': 'Jan', '02': 'Feb', '03': 'Mar', '04': 'Apr',
+            '05': 'May', '06': 'Jun', '07': 'Jul', '08': 'Aug',
+            '09': 'Sep', '10': 'Oct', '11': 'Nov', '12': 'Dec'
+        }
+        
+        return f"{day} {month_names[month]} {year}"
+    except:
+        return expiry_code
+
 def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print(f"📱 Telegram not configured: {message}")
@@ -73,35 +96,180 @@ class TimelineTracker:
             for step in self.timeline
         ])
 
+# ==================== EXPIRY MANAGEMENT ====================
+class ExpiryManager:
+    def __init__(self):
+        self.current_expiry = get_current_expiry()
+        self.active_expiry = self.get_initial_active_expiry()
+        self.last_expiry_check = 0
+        self.expiry_check_interval = 60  # Check every 60 seconds
+    
+    def get_initial_active_expiry(self):
+        """Determine which expiry should be active right now"""
+        now = datetime.now(timezone.utc)
+        ist_now = now + timedelta(hours=5, minutes=30)
+        
+        if ist_now.hour >= 17 and ist_now.minute >= 30:
+            next_day = ist_now + timedelta(days=1)
+            next_expiry = next_day.strftime("%d%m%y")
+            print(f"[{datetime.now()}] 🕠 After 5:30 PM, starting with next expiry: {next_expiry}")
+            return next_expiry
+        else:
+            print(f"[{datetime.now()}] 📅 Starting with today's expiry: {self.current_expiry}")
+            return self.current_expiry
+
+    def should_rollover_expiry(self):
+        """Check if we should move to next expiry"""
+        now = datetime.now(timezone.utc)
+        ist_now = now + timedelta(hours=5, minutes=30)
+        
+        if ist_now.hour >= 17 and ist_now.minute >= 30:
+            next_expiry = (ist_now + timedelta(days=1)).strftime("%d%m%y")
+            return next_expiry
+        return None
+
+    def get_available_expiries(self, asset):
+        """Get all available expiries from Delta API"""
+        try:
+            url = "https://api.delta.exchange/v2/products"
+            params = {
+                'contract_types': 'call_options,put_options',
+                'states': 'live'
+            }
+            
+            response = requests.get(url, params=params, timeout=10)
+            
+            if response.status_code == 200:
+                products = response.json().get('result', [])
+                expiries = set()
+                
+                for product in products:
+                    symbol = product.get('symbol', '')
+                    if asset in symbol:
+                        expiry = self.extract_expiry_from_symbol(symbol)
+                        if expiry:
+                            expiries.add(expiry)
+                
+                return sorted(expiries)
+            return []
+        except Exception as e:
+            print(f"[{datetime.now()}] ❌ Error fetching {asset} expiries: {e}")
+            return []
+
+    def extract_expiry_from_symbol(self, symbol):
+        """Extract expiry date from symbol string"""
+        try:
+            parts = symbol.split('-')
+            if len(parts) >= 4:
+                return parts[3]
+            return None
+        except:
+            return None
+
+    def get_next_available_expiry(self, asset, current_expiry):
+        """Get the next available expiry after current one"""
+        available_expiries = self.get_available_expiries(asset)
+        if not available_expiries:
+            return current_expiry
+        
+        print(f"[{datetime.now()}] 📊 {asset}: Available expiries: {available_expiries}")
+        
+        for expiry in available_expiries:
+            if expiry > current_expiry:
+                return expiry
+        
+        return available_expiries[-1] if available_expiries else current_expiry
+
+    def check_and_update_expiry(self, asset):
+        """Check if we need to update the active expiry"""
+        current_time = datetime.now().timestamp()
+        if current_time - self.last_expiry_check >= self.expiry_check_interval:
+            self.last_expiry_check = current_time
+            
+            current_time_str = get_ist_time()
+            print(f"[{datetime.now()}] 🔄 {asset}: Checking expiry rollover... (Current: {self.active_expiry}, Time: {current_time_str})")
+            
+            next_expiry = self.should_rollover_expiry()
+            if next_expiry and next_expiry != self.active_expiry:
+                print(f"[{datetime.now()}] 🎯 {asset}: EXPIRY ROLLOVER TRIGGERED!")
+                print(f"[{datetime.now()}] 📅 {asset}: Changing from {self.active_expiry} to {next_expiry}")
+                
+                actual_next_expiry = self.get_next_available_expiry(asset, self.active_expiry)
+                
+                if actual_next_expiry != self.active_expiry:
+                    old_expiry = self.active_expiry
+                    self.active_expiry = actual_next_expiry
+                    
+                    # Send Telegram notification
+                    expiry_display = format_expiry_display(self.active_expiry)
+                    send_telegram(f"🔄 {asset} Expiry Rollover Complete!\n\n📅 Now monitoring: {expiry_display}\n⏰ Time: {current_time_str}")
+                    return True
+                else:
+                    print(f"[{datetime.now()}] ⚠️ {asset}: No new expiry available yet, keeping: {self.active_expiry}")
+            
+            # Check if current expiry is still available
+            available_expiries = self.get_available_expiries(asset)
+            if available_expiries and self.active_expiry not in available_expiries:
+                print(f"[{datetime.now()}] ⚠️ {asset}: Current expiry {self.active_expiry} no longer available!")
+                next_available = self.get_next_available_expiry(asset, self.active_expiry)
+                if next_available != self.active_expiry:
+                    print(f"[{datetime.now()}] 🔄 {asset}: Switching to available expiry: {next_available}")
+                    self.active_expiry = next_available
+                    
+                    expiry_display = format_expiry_display(self.active_expiry)
+                    send_telegram(f"🔄 {asset} Expiry Update!\n\n📅 Now monitoring: {expiry_display}\n⏰ Time: {current_time_str}")
+                    return True
+        
+        return False
+
 # ==================== ARBITRAGE ENGINE ====================
 class UltraFastArbitrageEngine:
     def __init__(self):
-        self.eth_prices = self.generate_sample_eth_data()
-        self.btc_prices = self.generate_sample_btc_data()
-        self.cycle_count = 0
-        self.start_time = time.time()
+        self.expiry_manager = ExpiryManager()
+        self.eth_prices = {}
+        self.btc_prices = {}
     
-    def generate_sample_eth_data(self):
-        """Generate realistic ETH options data"""
-        return {
-            'ETH-3500-C': {'symbol': 'ETH-3500-C', 'bid': 1.40, 'ask': 1.50, 'qty': 80},
-            'ETH-3540-C': {'symbol': 'ETH-3540-C', 'bid': 0.80, 'ask': 0.90, 'qty': 36},
-            'ETH-3560-C': {'symbol': 'ETH-3560-C', 'bid': 0.50, 'ask': 0.60, 'qty': 50},
-            'ETH-3500-P': {'symbol': 'ETH-3500-P', 'bid': 0.90, 'ask': 1.00, 'qty': 45},
-            'ETH-3540-P': {'symbol': 'ETH-3540-P', 'bid': 1.20, 'ask': 1.30, 'qty': 60},
-            'ETH-3560-P': {'symbol': 'ETH-3560-P', 'bid': 1.50, 'ask': 1.60, 'qty': 30}
-        }
+    def generate_dynamic_data(self, asset, expiry):
+        """Generate realistic options data for current expiry"""
+        base_data = {}
+        strikes = [3500, 3540, 3560, 3580, 3600] if asset == "ETH" else [50000, 51000, 52000, 53000, 54000]
+        
+        for strike in strikes:
+            # Call options
+            call_bid = random.uniform(0.5, 2.0) if asset == "ETH" else random.uniform(8.0, 18.0)
+            call_ask = call_bid + random.uniform(0.1, 0.3) if asset == "ETH" else call_bid + random.uniform(0.5, 2.0)
+            base_data[f'{asset}-{strike}-C-{expiry}'] = {
+                'symbol': f'{asset}-{strike}-C-{expiry}',
+                'bid': round(call_bid, 2),
+                'ask': round(call_ask, 2),
+                'qty': random.randint(20, 100)
+            }
+            
+            # Put options
+            put_bid = random.uniform(0.8, 2.5) if asset == "ETH" else random.uniform(10.0, 20.0)
+            put_ask = put_bid + random.uniform(0.1, 0.4) if asset == "ETH" else put_bid + random.uniform(0.5, 2.5)
+            base_data[f'{asset}-{strike}-P-{expiry}'] = {
+                'symbol': f'{asset}-{strike}-P-{expiry}',
+                'bid': round(put_bid, 2),
+                'ask': round(put_ask, 2),
+                'qty': random.randint(15, 80)
+            }
+        
+        return base_data
     
-    def generate_sample_btc_data(self):
-        """Generate realistic BTC options data"""
-        return {
-            'BTC-50000-C': {'symbol': 'BTC-50000-C', 'bid': 16.50, 'ask': 16.80, 'qty': 45},
-            'BTC-51000-C': {'symbol': 'BTC-51000-C', 'bid': 12.20, 'ask': 12.50, 'qty': 60},
-            'BTC-52000-C': {'symbol': 'BTC-52000-C', 'bid': 8.80, 'ask': 9.10, 'qty': 30},
-            'BTC-50000-P': {'symbol': 'BTC-50000-P', 'bid': 18.50, 'ask': 18.80, 'qty': 35},
-            'BTC-51000-P': {'symbol': 'BTC-51000-P', 'bid': 15.20, 'ask': 15.50, 'qty': 50},
-            'BTC-52000-P': {'symbol': 'BTC-52000-P', 'bid': 12.80, 'ask': 13.10, 'qty': 25}
-        }
+    def fetch_data(self, asset):
+        """Fetch data with expiry rollover handling"""
+        # Check expiry rollover first
+        expiry_changed = self.expiry_manager.check_and_update_expiry(asset)
+        
+        if expiry_changed or asset not in self.eth_prices:
+            # Regenerate data with new expiry
+            if asset == "ETH":
+                self.eth_prices = self.generate_dynamic_data("ETH", self.expiry_manager.active_expiry)
+            else:
+                self.btc_prices = self.generate_dynamic_data("BTC", self.expiry_manager.active_expiry)
+        
+        return self.eth_prices if asset == "ETH" else self.btc_prices
     
     def find_arbitrage_opportunities(self, asset, options_data):
         """Ultra-fast arbitrage detection"""
@@ -438,15 +606,8 @@ class UltraFastAPIBot:
         self.cycle_count = 0
         self.start_time = time.time()
     
-    def fetch_data(self):
-        """Fetch data from API - ultra fast"""
-        if self.asset == "ETH":
-            return self.arbitrage_engine.eth_prices
-        else:
-            return self.arbitrage_engine.btc_prices
-    
     def ultra_fast_monitoring(self):
-        """Ultra-fast monitoring loop - no delays"""
+        """Ultra-fast monitoring loop with expiry rollover"""
         print(f"🚀 Starting Ultra-Fast {self.asset} Bot")
         
         while self.running:
@@ -454,8 +615,8 @@ class UltraFastAPIBot:
             self.cycle_count += 1
             
             try:
-                # 1. Fetch data (ultra fast)
-                data = self.fetch_data()
+                # 1. Fetch data with expiry rollover handling
+                data = self.arbitrage_engine.fetch_data(self.asset)
                 
                 # 2. Find opportunities (ultra fast)
                 opportunities = self.arbitrage_engine.find_arbitrage_opportunities(self.asset, data)
@@ -468,7 +629,8 @@ class UltraFastAPIBot:
                 if self.cycle_count % 500 == 0:
                     elapsed = time.time() - self.start_time
                     cycles_per_second = self.cycle_count / elapsed
-                    print(f"⚡ {self.asset}: {cycles_per_second:.1f} cycles/second")
+                    current_expiry = self.arbitrage_engine.expiry_manager.active_expiry
+                    print(f"⚡ {self.asset}: {cycles_per_second:.1f} cycles/second | Expiry: {current_expiry}")
                 
                 # 5. No sleep - immediate next cycle
                 # Only tiny pause if needed to avoid 100% CPU
@@ -490,7 +652,7 @@ def home():
     <p><strong>ETH:</strong> ${ETH_PARAMS['min_profit']} min profit</p>
     <p><strong>BTC:</strong> ${BTC_PARAMS['min_profit']} min profit</p>
     <p><strong>Polling:</strong> Maximum Speed (No Delays)</p>
-    <p><strong>Features:</strong> Partial Fill Handling ✅</p>
+    <p><strong>Features:</strong> Partial Fill Handling ✅ | Auto Expiry Rollover ✅</p>
     <p><a href="/health">Health Check</a></p>
     """
 
@@ -503,7 +665,7 @@ def health():
         "eth_min_profit": ETH_PARAMS['min_profit'],
         "btc_min_profit": BTC_PARAMS['min_profit'],
         "polling_speed": "maximum",
-        "features": ["partial_fill_handling", "ultra_fast_api"],
+        "features": ["partial_fill_handling", "auto_expiry_rollover", "ultra_fast_api"],
         "timestamp": get_ist_time()
     }
 
@@ -517,7 +679,7 @@ def start_ultra_fast_bots():
     print(f"🔵 ETH: ${ETH_PARAMS['min_profit']} min profit, ${ETH_PARAMS['price_increment']} increments")
     print(f"🟡 BTC: ${BTC_PARAMS['min_profit']} min profit, ${BTC_PARAMS['price_increment']} increments")
     print(f"⚡ Polling: Maximum Speed (No Delays)")
-    print(f"🔄 Features: Partial Fill Handling Enabled")
+    print(f"🔄 Features: Partial Fill Handling + Auto Expiry Rollover")
     print(f"📝 Paper Trading: {PAPER_TRADING}")
     
     # Start bots in separate threads
@@ -527,7 +689,7 @@ def start_ultra_fast_bots():
     eth_thread.start()
     btc_thread.start()
     
-    send_telegram(f"🤖 Ultra-Fast Arbitrage Bot Started\n\n🔵 ETH: ${ETH_PARAMS['min_profit']} min profit\n🟡 BTC: ${BTC_PARAMS['min_profit']} min profit\n⚡ Polling: Maximum Speed\n🔄 Partial Fills: Enabled\n📝 Paper Trading: {PAPER_TRADING}")
+    send_telegram(f"🤖 Ultra-Fast Arbitrage Bot Started\n\n🔵 ETH: ${ETH_PARAMS['min_profit']} min profit\n🟡 BTC: ${BTC_PARAMS['min_profit']} min profit\n⚡ Polling: Maximum Speed\n🔄 Partial Fills: Enabled\n📅 Auto Expiry Rollover: Enabled\n📝 Paper Trading: {PAPER_TRADING}")
 
 if __name__ == "__main__":
     start_ultra_fast_bots()
