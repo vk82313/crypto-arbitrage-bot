@@ -222,60 +222,110 @@ class ExpiryManager:
         
         return False
 
-# ==================== ARBITRAGE ENGINE ====================
-class UltraFastArbitrageEngine:
+# ==================== LIVE MARKET DATA ====================
+class LiveMarketData:
     def __init__(self):
         self.expiry_manager = ExpiryManager()
         self.eth_prices = {}
         self.btc_prices = {}
+        self.last_data_fetch = 0
+        self.data_fetch_interval = 2  # Fetch every 2 seconds
     
-    def generate_dynamic_data(self, asset, expiry):
-        """Generate realistic options data for current expiry"""
-        base_data = {}
-        strikes = [3500, 3540, 3560, 3580, 3600] if asset == "ETH" else [50000, 51000, 52000, 53000, 54000]
-        
-        for strike in strikes:
-            # Call options
-            call_bid = random.uniform(0.5, 2.0) if asset == "ETH" else random.uniform(8.0, 18.0)
-            call_ask = call_bid + random.uniform(0.1, 0.3) if asset == "ETH" else call_bid + random.uniform(0.5, 2.0)
-            base_data[f'{asset}-{strike}-C-{expiry}'] = {
-                'symbol': f'{asset}-{strike}-C-{expiry}',
-                'bid': round(call_bid, 2),
-                'ask': round(call_ask, 2),
-                'qty': random.randint(20, 100)
+    def fetch_live_market_data(self, asset):
+        """Fetch REAL trading data from Delta Exchange"""
+        try:
+            current_time = time.time()
+            if current_time - self.last_data_fetch < self.data_fetch_interval:
+                # Return cached data if too soon
+                return self.eth_prices if asset == "ETH" else self.btc_prices
+            
+            self.last_data_fetch = current_time
+            
+            # First, check and update expiry
+            self.expiry_manager.check_and_update_expiry(asset)
+            current_expiry = self.expiry_manager.active_expiry
+            
+            # Fetch all products
+            url = "https://api.delta.exchange/v2/products"
+            params = {
+                'contract_types': 'call_options,put_options',
+                'states': 'live'
             }
             
-            # Put options
-            put_bid = random.uniform(0.8, 2.5) if asset == "ETH" else random.uniform(10.0, 20.0)
-            put_ask = put_bid + random.uniform(0.1, 0.4) if asset == "ETH" else put_bid + random.uniform(0.5, 2.5)
-            base_data[f'{asset}-{strike}-P-{expiry}'] = {
-                'symbol': f'{asset}-{strike}-P-{expiry}',
-                'bid': round(put_bid, 2),
-                'ask': round(put_ask, 2),
-                'qty': random.randint(15, 80)
-            }
-        
-        return base_data
+            response = requests.get(url, params=params, timeout=10)
+            
+            if response.status_code == 200:
+                products = response.json().get('result', [])
+                market_data = {}
+                
+                for product in products:
+                    symbol = product.get('symbol', '')
+                    
+                    # Filter for current asset and expiry
+                    if asset in symbol and current_expiry in symbol:
+                        product_id = product.get('id')
+                        
+                        # Fetch ticker data for current prices
+                        ticker_url = f"https://api.delta.exchange/v2/tickers"
+                        ticker_params = {'symbol': symbol}
+                        
+                        ticker_response = requests.get(ticker_url, params=ticker_params, timeout=10)
+                        
+                        if ticker_response.status_code == 200:
+                            ticker_data = ticker_response.json()
+                            if ticker_data.get('result'):
+                                ticker = ticker_data['result'][0]
+                                quotes = ticker.get('quotes', {})
+                                
+                                bid_price = float(quotes.get('best_bid', 0))
+                                ask_price = float(quotes.get('best_ask', 0))
+                                
+                                # Only include options with valid prices
+                                if bid_price > 0 and ask_price > 0:
+                                    market_data[symbol] = {
+                                        'symbol': symbol,
+                                        'bid': bid_price,
+                                        'ask': ask_price,
+                                        'qty': 50  # Default quantity for paper trading
+                                    }
+                                    print(f"📊 {asset}: {symbol} - Bid: ${bid_price:.2f}, Ask: ${ask_price:.2f}")
+                
+                # Update cache
+                if asset == "ETH":
+                    self.eth_prices = market_data
+                else:
+                    self.btc_prices = market_data
+                
+                print(f"✅ {asset}: Fetched {len(market_data)} live options for expiry {current_expiry}")
+                return market_data
+            else:
+                print(f"❌ {asset}: API Error {response.status_code}")
+                return {}
+                
+        except Exception as e:
+            print(f"❌ {asset}: Error fetching live data: {e}")
+            return self.eth_prices if asset == "ETH" else self.btc_prices  # Return cached data on error
+
+# ==================== ARBITRAGE ENGINE ====================
+class UltraFastArbitrageEngine:
+    def __init__(self):
+        self.market_data = LiveMarketData()
     
     def fetch_data(self, asset):
-        """Fetch data with expiry rollover handling"""
-        # Check expiry rollover first
-        expiry_changed = self.expiry_manager.check_and_update_expiry(asset)
-        
-        if expiry_changed or asset not in self.eth_prices:
-            # Regenerate data with new expiry
-            if asset == "ETH":
-                self.eth_prices = self.generate_dynamic_data("ETH", self.expiry_manager.active_expiry)
-            else:
-                self.btc_prices = self.generate_dynamic_data("BTC", self.expiry_manager.active_expiry)
-        
-        return self.eth_prices if asset == "ETH" else self.btc_prices
+        """Fetch live market data"""
+        return self.market_data.fetch_live_market_data(asset)
     
     def find_arbitrage_opportunities(self, asset, options_data):
-        """Ultra-fast arbitrage detection"""
+        """Ultra-fast arbitrage detection with REAL data"""
+        if not options_data:
+            return []
+            
         opportunities = []
         strikes = self.group_options_by_strike(options_data)
         sorted_strikes = sorted(strikes.keys())
+        
+        if len(sorted_strikes) < 2:
+            return []
         
         for i in range(len(sorted_strikes) - 1):
             strike1 = sorted_strikes[i]
@@ -607,52 +657,53 @@ class UltraFastAPIBot:
         self.start_time = time.time()
     
     def ultra_fast_monitoring(self):
-        """Ultra-fast monitoring loop with expiry rollover"""
-        print(f"🚀 Starting Ultra-Fast {self.asset} Bot")
+        """Ultra-fast monitoring loop with LIVE market data"""
+        print(f"🚀 Starting Ultra-Fast {self.asset} Bot with LIVE Data")
         
         while self.running:
             cycle_start = time.time()
             self.cycle_count += 1
             
             try:
-                # 1. Fetch data with expiry rollover handling
+                # 1. Fetch LIVE market data
                 data = self.arbitrage_engine.fetch_data(self.asset)
                 
-                # 2. Find opportunities (ultra fast)
+                # 2. Find opportunities with REAL data
                 opportunities = self.arbitrage_engine.find_arbitrage_opportunities(self.asset, data)
                 
                 # 3. Execute immediately if opportunities found
                 if opportunities:
+                    print(f"🎯 {self.asset}: Found {len(opportunities)} opportunities")
                     self.order_executor.execute_arbitrage_trade(self.asset, opportunities[0])
                 
-                # 4. Log speed every 500 cycles
-                if self.cycle_count % 500 == 0:
+                # 4. Log speed every 100 cycles
+                if self.cycle_count % 100 == 0:
                     elapsed = time.time() - self.start_time
                     cycles_per_second = self.cycle_count / elapsed
-                    current_expiry = self.arbitrage_engine.expiry_manager.active_expiry
-                    print(f"⚡ {self.asset}: {cycles_per_second:.1f} cycles/second | Expiry: {current_expiry}")
+                    current_expiry = self.arbitrage_engine.market_data.expiry_manager.active_expiry
+                    data_count = len(data)
+                    print(f"⚡ {self.asset}: {cycles_per_second:.1f} cycles/sec | Expiry: {current_expiry} | Options: {data_count}")
                 
                 # 5. No sleep - immediate next cycle
-                # Only tiny pause if needed to avoid 100% CPU
                 elapsed_cycle = time.time() - cycle_start
-                if elapsed_cycle < 0.05:  # If cycle too fast
-                    time.sleep(0.02)  # 20ms tiny pause
+                if elapsed_cycle < 0.1:  # If cycle too fast
+                    time.sleep(0.05)  # 50ms tiny pause
                     
             except Exception as e:
                 print(f"❌ {self.asset} Bot error: {e}")
-                time.sleep(0.1)  # Brief pause on error
+                time.sleep(0.5)  # Brief pause on error
 
 # ==================== FLASK ROUTES ====================
 @app.route('/')
 def home():
     return f"""
     <h1>🚀 Ultra-Fast Crypto Arbitrage Bot</h1>
-    <p><strong>Status:</strong> Running - Ultra Fast Mode</p>
+    <p><strong>Status:</strong> Running - LIVE Market Data</p>
     <p><strong>Paper Trading:</strong> {PAPER_TRADING}</p>
     <p><strong>ETH:</strong> ${ETH_PARAMS['min_profit']} min profit</p>
     <p><strong>BTC:</strong> ${BTC_PARAMS['min_profit']} min profit</p>
-    <p><strong>Polling:</strong> Maximum Speed (No Delays)</p>
-    <p><strong>Features:</strong> Partial Fill Handling ✅ | Auto Expiry Rollover ✅</p>
+    <p><strong>Data Source:</strong> Delta Exchange LIVE API</p>
+    <p><strong>Features:</strong> Live Data ✅ | Partial Fills ✅ | Auto Expiry ✅</p>
     <p><a href="/health">Health Check</a></p>
     """
 
@@ -660,12 +711,12 @@ def home():
 def health():
     return {
         "status": "healthy",
-        "mode": "ultra_fast",
+        "mode": "ultra_fast_live_data",
         "paper_trading": PAPER_TRADING,
         "eth_min_profit": ETH_PARAMS['min_profit'],
         "btc_min_profit": BTC_PARAMS['min_profit'],
-        "polling_speed": "maximum",
-        "features": ["partial_fill_handling", "auto_expiry_rollover", "ultra_fast_api"],
+        "data_source": "delta_exchange_live_api",
+        "features": ["live_market_data", "partial_fill_handling", "auto_expiry_rollover"],
         "timestamp": get_ist_time()
     }
 
@@ -674,12 +725,12 @@ eth_bot = UltraFastAPIBot("ETH")
 btc_bot = UltraFastAPIBot("BTC")
 
 def start_ultra_fast_bots():
-    """Start both bots in ultra-fast mode"""
-    print("🚀 Starting Ultra-Fast Crypto Arbitrage Bot...")
+    """Start both bots with LIVE market data"""
+    print("🚀 Starting Ultra-Fast Crypto Arbitrage Bot with LIVE Data...")
     print(f"🔵 ETH: ${ETH_PARAMS['min_profit']} min profit, ${ETH_PARAMS['price_increment']} increments")
     print(f"🟡 BTC: ${BTC_PARAMS['min_profit']} min profit, ${BTC_PARAMS['price_increment']} increments")
-    print(f"⚡ Polling: Maximum Speed (No Delays)")
-    print(f"🔄 Features: Partial Fill Handling + Auto Expiry Rollover")
+    print(f"⚡ Polling: Maximum Speed with LIVE Delta Exchange Data")
+    print(f"🔄 Features: Live Data + Partial Fills + Auto Expiry Rollover")
     print(f"📝 Paper Trading: {PAPER_TRADING}")
     
     # Start bots in separate threads
@@ -689,7 +740,7 @@ def start_ultra_fast_bots():
     eth_thread.start()
     btc_thread.start()
     
-    send_telegram(f"🤖 Ultra-Fast Arbitrage Bot Started\n\n🔵 ETH: ${ETH_PARAMS['min_profit']} min profit\n🟡 BTC: ${BTC_PARAMS['min_profit']} min profit\n⚡ Polling: Maximum Speed\n🔄 Partial Fills: Enabled\n📅 Auto Expiry Rollover: Enabled\n📝 Paper Trading: {PAPER_TRADING}")
+    send_telegram(f"🤖 Ultra-Fast Arbitrage Bot Started\n\n🔵 ETH: ${ETH_PARAMS['min_profit']} min profit\n🟡 BTC: ${BTC_PARAMS['min_profit']} min profit\n⚡ Polling: Maximum Speed\n📊 Data: LIVE Delta Exchange\n🔄 Partial Fills: Enabled\n📅 Auto Expiry: Enabled\n📝 Paper Trading: {PAPER_TRADING}")
 
 if __name__ == "__main__":
     start_ultra_fast_bots()
