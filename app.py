@@ -123,7 +123,6 @@ class BatchedTelegramAlerts:
         self.alert_messages = []
         self.last_alert_time = 0
         self.alert_interval = 300  # 5 minutes
-        self.critical_messages = []
     
     def add_alert(self, message: str, immediate: bool = False):
         """Add alert to batch or send immediately"""
@@ -415,15 +414,13 @@ class LiveMarketData:
                                 ask_price = float(quotes.get('best_ask', 0))
                                 
                                 # Only include options with valid prices
-                                if bid_price > 0 and ask_price > 0:
+                                if bid_price > 0 and ask_price > 0 and bid_price != ask_price:  # Added spread check
                                     market_data[symbol] = {
                                         'symbol': symbol,
                                         'bid': bid_price,
                                         'ask': ask_price,
                                         'qty': 50  # Default quantity for paper trading
                                     }
-                                    # Batched alert for data updates
-                                    batched_alerts.add_alert(f"📊 {asset}: {symbol} - Bid: ${bid_price:.2f}, Ask: ${ask_price:.2f}")
                 
                 # Update cache
                 if asset == "ETH":
@@ -490,8 +487,8 @@ class UltraFastArbitrageEngine:
             
             profit = call2_bid - call1_ask
             if profit >= asset_params['min_profit']:
-                # Batched alert for opportunity found
-                batched_alerts.add_alert(f"🎯 {asset} CALL Opportunity: {strike1}→{strike2} | Profit: ${profit:.2f}")
+                # Only log to console, don't spam Telegram
+                print(f"🎯 {asset} CALL Opportunity: {strike1}→{strike2} | Profit: ${profit:.2f}")
                 return {
                     'type': 'CALL',
                     'strike1': strike1,
@@ -518,8 +515,8 @@ class UltraFastArbitrageEngine:
             
             profit = put1_bid - put2_ask
             if profit >= asset_params['min_profit']:
-                # Batched alert for opportunity found
-                batched_alerts.add_alert(f"🎯 {asset} PUT Opportunity: {strike1}→{strike2} | Profit: ${profit:.2f}")
+                # Only log to console, don't spam Telegram
+                print(f"🎯 {asset} PUT Opportunity: {strike1}→{strike2} | Profit: ${profit:.2f}")
                 return {
                     'type': 'PUT',
                     'strike1': strike1,
@@ -581,7 +578,7 @@ class UltraFastOrderExecutor:
             if filled_qty == quantity:
                 # Full fill
                 timeline.add_step(f"SELL: {filled_qty} lots @ ${price:.2f}", "✅")
-                batched_alerts.add_alert(f"✅ {asset} SELL FULL FILL: {filled_qty} lots @ ${price:.2f}")
+                batched_alerts.add_alert(f"✅ {asset} SELL FILLED: {filled_qty} lots @ ${price:.2f}")
                 print(f"📝 PAPER: SELL {filled_qty}/{quantity} {symbol} @ ${price:.2f} - FULL FILL")
             else:
                 # Partial fill
