@@ -3,6 +3,8 @@ import time
 import threading
 import requests
 import random
+import traceback
+import sys
 from datetime import datetime, timedelta, timezone
 from flask import Flask
 
@@ -27,6 +29,149 @@ BTC_PARAMS = {
     'min_profit': float(os.getenv("BTC_MIN_PROFIT", "3.00")),
     'price_increment': float(os.getenv("BTC_PRICE_INCREMENT", "1.00"))
 }
+
+# ==================== GLOBAL ERROR HANDLER ====================
+class GlobalErrorHandler:
+    def __init__(self):
+        self.is_shutdown = False
+        self.bots = []
+    
+    def register_bot(self, bot):
+        self.bots.append(bot)
+    
+    def global_exception_handler(self, exc_type, exc_value, exc_traceback):
+        """Global exception handler that stops everything and sends alert"""
+        if self.is_shutdown:
+            return
+        
+        self.is_shutdown = True
+        
+        # Get detailed error information
+        error_time = get_ist_time()
+        error_details = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        
+        # Create comprehensive error message
+        error_message = f"""
+🚨🚨🚨 CRITICAL BOT FAILURE 🚨🚨🚨
+
+⏰ Time: {error_time} IST
+🔴 Status: ALL BOTS STOPPED
+💥 Error Type: {exc_type.__name__}
+
+📋 Error Details:
+{str(exc_value)}
+
+🔧 Stack Trace:
+{error_details[:1500]}...  # Truncate if too long
+
+🛑 ACTION REQUIRED:
+• All trading has been STOPPED
+• Manual restart required
+• Check PythonAnywhere logs
+• Verify API connectivity
+
+⚠️ DO NOT IGNORE - Trading is completely halted!
+"""
+        
+        # Send immediate critical alert
+        self.send_critical_alert(error_message)
+        
+        # Stop all bots
+        self.stop_all_bots()
+        
+        # Exit the application
+        print("🛑 CRITICAL ERROR - Application shutting down...")
+        os._exit(1)  # Force exit
+    
+    def send_critical_alert(self, message):
+        """Send critical alert immediately (bypass batching)"""
+        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+            print(f"📱 Telegram not configured, but would send: {message}")
+            return
+            
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
+                "parse_mode": "Markdown"
+            }
+            response = requests.post(url, json=payload, timeout=10)
+            if response.status_code == 200:
+                print("📱 CRITICAL ALERT SENT TO TELEGRAM")
+            else:
+                print(f"❌ Failed to send critical alert: {response.status_code}")
+        except Exception as e:
+            print(f"❌ Critical alert failed: {e}")
+    
+    def stop_all_bots(self):
+        """Stop all running bots"""
+        print("🛑 Stopping all bots...")
+        for bot in self.bots:
+            bot.running = False
+        print("✅ All bots stopped")
+
+# Initialize global error handler
+error_handler = GlobalErrorHandler()
+
+# Set global exception handler
+sys.excepthook = error_handler.global_exception_handler
+
+# ==================== BATCHED TELEGRAM ALERTS ====================
+class BatchedTelegramAlerts:
+    def __init__(self):
+        self.alert_messages = []
+        self.last_alert_time = 0
+        self.alert_interval = 300  # 5 minutes
+        self.critical_messages = []
+    
+    def add_alert(self, message: str, immediate: bool = False):
+        """Add alert to batch or send immediately"""
+        timestamp = get_ist_time()
+        formatted_message = f"[{timestamp}] {message}"
+        
+        if immediate:
+            # Send critical alerts immediately
+            self._send_telegram_message(formatted_message)
+        else:
+            # Batch non-critical alerts
+            self.alert_messages.append(formatted_message)
+            
+            current_time = time.time()
+            if current_time - self.last_alert_time >= self.alert_interval or len(self.alert_messages) >= 10:
+                self._send_batched_alerts()
+                self.last_alert_time = current_time
+    
+    def _send_batched_alerts(self):
+        """Send batched alerts as a single message"""
+        if self.alert_messages:
+            batched_message = "📊 **5-Minute Activity Summary**\n\n" + "\n".join(self.alert_messages)
+            self._send_telegram_message(batched_message)
+            self.alert_messages = []
+    
+    def _send_telegram_message(self, message: str):
+        """Send actual Telegram message"""
+        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+            print(f"📱 Telegram not configured: {message}")
+            return
+            
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
+                "parse_mode": "Markdown"
+            }
+            response = requests.post(url, json=payload, timeout=5)
+            if response.status_code == 200:
+                print(f"📱 Telegram sent: {message[:50]}...")
+            else:
+                print(f"❌ Telegram error: {response.status_code}")
+        except Exception as e:
+            print(f"❌ Telegram failed: {e}")
+
+# Initialize batched alerts
+batched_alerts = BatchedTelegramAlerts()
 
 # ==================== UTILITIES ====================
 def get_ist_time():
@@ -58,25 +203,14 @@ def format_expiry_display(expiry_code):
     except:
         return expiry_code
 
-def send_telegram(message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"📱 Telegram not configured: {message}")
-        return
-    
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "Markdown"
-        }
-        response = requests.post(url, json=payload, timeout=5)
-        if response.status_code == 200:
-            print(f"📱 Telegram sent")
-        else:
-            print(f"❌ Telegram error: {response.status_code}")
-    except Exception as e:
-        print(f"❌ Telegram failed: {e}")
+def send_telegram(message, immediate=False):
+    """Enhanced send_telegram that uses batched alerts"""
+    if immediate:
+        # Critical messages sent immediately
+        batched_alerts.add_alert(message, immediate=True)
+    else:
+        # Regular messages batched
+        batched_alerts.add_alert(message, immediate=False)
 
 class TimelineTracker:
     def __init__(self):
@@ -200,7 +334,7 @@ class ExpiryManager:
                     old_expiry = self.active_expiry
                     self.active_expiry = actual_next_expiry
                     
-                    # Send Telegram notification
+                    # Send Telegram notification (batched)
                     expiry_display = format_expiry_display(self.active_expiry)
                     send_telegram(f"🔄 {asset} Expiry Rollover Complete!\n\n📅 Now monitoring: {expiry_display}\n⏰ Time: {current_time_str}")
                     return True
@@ -288,7 +422,8 @@ class LiveMarketData:
                                         'ask': ask_price,
                                         'qty': 50  # Default quantity for paper trading
                                     }
-                                    print(f"📊 {asset}: {symbol} - Bid: ${bid_price:.2f}, Ask: ${ask_price:.2f}")
+                                    # Batched alert for data updates
+                                    batched_alerts.add_alert(f"📊 {asset}: {symbol} - Bid: ${bid_price:.2f}, Ask: ${ask_price:.2f}")
                 
                 # Update cache
                 if asset == "ETH":
@@ -355,6 +490,8 @@ class UltraFastArbitrageEngine:
             
             profit = call2_bid - call1_ask
             if profit >= asset_params['min_profit']:
+                # Batched alert for opportunity found
+                batched_alerts.add_alert(f"🎯 {asset} CALL Opportunity: {strike1}→{strike2} | Profit: ${profit:.2f}")
                 return {
                     'type': 'CALL',
                     'strike1': strike1,
@@ -381,6 +518,8 @@ class UltraFastArbitrageEngine:
             
             profit = put1_bid - put2_ask
             if profit >= asset_params['min_profit']:
+                # Batched alert for opportunity found
+                batched_alerts.add_alert(f"🎯 {asset} PUT Opportunity: {strike1}→{strike2} | Profit: ${profit:.2f}")
                 return {
                     'type': 'PUT',
                     'strike1': strike1,
@@ -442,11 +581,13 @@ class UltraFastOrderExecutor:
             if filled_qty == quantity:
                 # Full fill
                 timeline.add_step(f"SELL: {filled_qty} lots @ ${price:.2f}", "✅")
+                batched_alerts.add_alert(f"✅ {asset} SELL FULL FILL: {filled_qty} lots @ ${price:.2f}")
                 print(f"📝 PAPER: SELL {filled_qty}/{quantity} {symbol} @ ${price:.2f} - FULL FILL")
             else:
                 # Partial fill
                 timeline.add_step(f"SELL: {filled_qty}/{quantity} lots @ ${price:.2f}", "✅")
                 timeline.add_step(f"SELL: {quantity-filled_qty} lots CANCELLED", "❌")
+                batched_alerts.add_alert(f"⚠️ {asset} SELL PARTIAL FILL: {filled_qty}/{quantity} lots @ ${price:.2f}")
                 print(f"📝 PAPER: SELL {filled_qty}/{quantity} {symbol} @ ${price:.2f} - PARTIAL FILL")
             
             return filled_qty, timeline
@@ -461,6 +602,7 @@ class UltraFastOrderExecutor:
         
         current_price = original_price
         timeline.add_step(f"BUY: {quantity} lots @ ${current_price:.2f}", "📝")
+        batched_alerts.add_alert(f"📝 {asset} BUY ATTEMPT: {quantity} lots @ ${current_price:.2f}")
         
         if PAPER_TRADING:
             # Realistic simulation
@@ -472,36 +614,45 @@ class UltraFastOrderExecutor:
             if scenario == 'instant':
                 time.sleep(0.1)
                 timeline.add_step(f"BUY: {quantity} lots @ ${current_price:.2f}", "✅")
+                batched_alerts.add_alert(f"✅ {asset} BUY FILLED: {quantity} lots @ ${current_price:.2f}")
                 return True, current_price, timeline
             
             elif scenario == 'adjustment':
                 time.sleep(0.2)
                 current_price += asset_params['price_increment']
                 timeline.add_step(f"BUY not filled → ${current_price:.2f}", "🔄")
+                batched_alerts.add_alert(f"🔄 {asset} BUY ADJUSTMENT: ${current_price:.2f}")
                 time.sleep(0.1)
                 timeline.add_step(f"BUY: {quantity} lots @ ${current_price:.2f}", "✅")
+                batched_alerts.add_alert(f"✅ {asset} BUY FILLED: {quantity} lots @ ${current_price:.2f}")
                 return True, current_price, timeline
             
             elif scenario == 'match_price':
                 time.sleep(0.2)
                 current_price += asset_params['price_increment']
                 timeline.add_step(f"BUY not filled → ${current_price:.2f}", "🔄")
+                batched_alerts.add_alert(f"🔄 {asset} BUY ADJUSTMENT: ${current_price:.2f}")
                 time.sleep(0.2)
                 current_price = sell_price
                 timeline.add_step(f"BUY not filled → ${current_price:.2f} (sell price)", "🚀")
+                batched_alerts.add_alert(f"🚀 {asset} BUY MATCH SELL: ${current_price:.2f}")
                 time.sleep(0.1)
                 timeline.add_step(f"BUY: {quantity} lots @ ${current_price:.2f}", "✅")
+                batched_alerts.add_alert(f"✅ {asset} BUY FILLED: {quantity} lots @ ${current_price:.2f}")
                 return True, current_price, timeline
             
             else:  # abandon
                 time.sleep(0.2)
                 current_price += asset_params['price_increment']
                 timeline.add_step(f"BUY not filled → ${current_price:.2f}", "🔄")
+                batched_alerts.add_alert(f"🔄 {asset} BUY ADJUSTMENT: ${current_price:.2f}")
                 time.sleep(0.2)
                 current_price = sell_price
                 timeline.add_step(f"BUY not filled → ${current_price:.2f} (sell price)", "🚀")
+                batched_alerts.add_alert(f"🚀 {asset} BUY MATCH SELL: ${current_price:.2f}")
                 time.sleep(0.1)
                 timeline.add_step("BUY ABANDONED - Not filled", "❌")
+                batched_alerts.add_alert(f"❌ {asset} BUY ABANDONED: Manual intervention needed")
                 return False, current_price, timeline
         
         return True, original_price, timeline
@@ -521,6 +672,9 @@ class UltraFastOrderExecutor:
             
             emoji = "🔵" if asset == "ETH" else "🟡"
             asset_params = ETH_PARAMS if asset == "ETH" else BTC_PARAMS
+            
+            # Batched alert for trade attempt
+            batched_alerts.add_alert(f"🎯 {asset} TRADE ATTEMPT: {opportunity['type']} {opportunity['strike1']}→{opportunity['strike2']} | Qty: {trade_qty}")
             
             # Execute sell order with partial fill handling
             filled_qty, sell_timeline = self.execute_sell_with_partial_fill(
@@ -552,7 +706,7 @@ class UltraFastOrderExecutor:
             combined_timeline = TimelineTracker()
             combined_timeline.timeline = sell_timeline.timeline + buy_timeline.timeline
             
-            # Send result message
+            # Send result message (immediate for trade completion)
             self.send_trade_result_message(
                 asset, opportunity, trade_qty, filled_qty, final_price, 
                 combined_timeline, emoji, buy_success
@@ -562,7 +716,7 @@ class UltraFastOrderExecutor:
             
         except Exception as e:
             error_msg = f"🚨 {asset} TRADE ERROR: {str(e)}"
-            send_telegram(error_msg)
+            send_telegram(error_msg, immediate=True)  # Immediate for errors
             print(f"{asset} Trade Error: {e}")
             return False
 
@@ -580,7 +734,7 @@ class UltraFastOrderExecutor:
 
 🕒 Time: {get_ist_time()} IST
 """
-        send_telegram(message)
+        send_telegram(message, immediate=True)  # Immediate for partial fills
 
     def send_trade_result_message(self, asset, opportunity, ordered_qty, filled_qty, final_price, timeline, emoji, success):
         """Send trade result to Telegram"""
@@ -627,7 +781,7 @@ class UltraFastOrderExecutor:
 🕒 Abandoned: {get_ist_time()} IST
 """
         
-        send_telegram(message)
+        send_telegram(message, immediate=True)  # Immediate for trade results
 
     def send_sell_timeout_alert(self, asset, opportunity, quantity, emoji):
         """Send sell timeout alert"""
@@ -644,7 +798,7 @@ class UltraFastOrderExecutor:
 
 🕒 Time: {get_ist_time()} IST
 """
-        send_telegram(message)
+        send_telegram(message, immediate=True)  # Immediate for timeouts
 
 # ==================== ULTRA-FAST BOTS ====================
 class UltraFastAPIBot:
@@ -655,9 +809,14 @@ class UltraFastAPIBot:
         self.running = True
         self.cycle_count = 0
         self.start_time = time.time()
+        self.last_status_update = 0
+        self.status_update_interval = 300  # 5 minutes
+        
+        # Register with global error handler
+        error_handler.register_bot(self)
     
     def ultra_fast_monitoring(self):
-        """Ultra-fast monitoring loop with LIVE market data"""
+        """Ultra-fast monitoring loop with comprehensive error handling"""
         print(f"🚀 Starting Ultra-Fast {self.asset} Bot with LIVE Data")
         
         while self.running:
@@ -676,13 +835,19 @@ class UltraFastAPIBot:
                     print(f"🎯 {self.asset}: Found {len(opportunities)} opportunities")
                     self.order_executor.execute_arbitrage_trade(self.asset, opportunities[0])
                 
-                # 4. Log speed every 100 cycles
-                if self.cycle_count % 100 == 0:
+                # 4. Send periodic status updates (batched)
+                current_time = time.time()
+                if current_time - self.last_status_update >= self.status_update_interval:
                     elapsed = time.time() - self.start_time
                     cycles_per_second = self.cycle_count / elapsed
                     current_expiry = self.arbitrage_engine.market_data.expiry_manager.active_expiry
                     data_count = len(data)
-                    print(f"⚡ {self.asset}: {cycles_per_second:.1f} cycles/sec | Expiry: {current_expiry} | Options: {data_count}")
+                    
+                    status_msg = f"📈 {self.asset} Status: {cycles_per_second:.1f} cycles/sec | Expiry: {current_expiry} | Options: {data_count}"
+                    batched_alerts.add_alert(status_msg)
+                    
+                    self.last_status_update = current_time
+                    print(f"⚡ {asset}: {cycles_per_second:.1f} cycles/sec | Expiry: {current_expiry} | Options: {data_count}")
                 
                 # 5. No sleep - immediate next cycle
                 elapsed_cycle = time.time() - cycle_start
@@ -691,7 +856,51 @@ class UltraFastAPIBot:
                     
             except Exception as e:
                 print(f"❌ {self.asset} Bot error: {e}")
-                time.sleep(0.5)  # Brief pause on error
+                batched_alerts.add_alert(f"❌ {self.asset} Bot error: {str(e)}")
+                
+                # If it's a critical error, trigger global shutdown
+                if self.is_critical_error(e):
+                    raise e  # This will trigger the global exception handler
+                else:
+                    time.sleep(0.5)  # Brief pause on non-critical error
+    
+    def is_critical_error(self, error):
+        """Determine if an error is critical enough to stop everything"""
+        critical_errors = [
+            "ConnectionError",
+            "Timeout", 
+            "APIError",
+            "KeyboardInterrupt",
+            "SystemExit",
+            "MemoryError",
+            "RuntimeError"
+        ]
+        
+        error_type = type(error).__name__
+        error_str = str(error).lower()
+        
+        # Network/connection issues
+        if any(err in error_type for err in ['Connection', 'Timeout', 'API']):
+            return True
+        
+        # Python environment issues
+        if any(err in error_type for err in ['Memory', 'System', 'Keyboard']):
+            return True
+        
+        # Specific error messages indicating critical failure
+        critical_phrases = [
+            'max retries exceeded',
+            'connection broken',
+            'invalid api key',
+            'rate limit exceeded',
+            'out of memory',
+            'no module named'
+        ]
+        
+        if any(phrase in error_str for phrase in critical_phrases):
+            return True
+        
+        return False
 
 # ==================== FLASK ROUTES ====================
 @app.route('/')
@@ -703,7 +912,7 @@ def home():
     <p><strong>ETH:</strong> ${ETH_PARAMS['min_profit']} min profit</p>
     <p><strong>BTC:</strong> ${BTC_PARAMS['min_profit']} min profit</p>
     <p><strong>Data Source:</strong> Delta Exchange LIVE API</p>
-    <p><strong>Features:</strong> Live Data ✅ | Partial Fills ✅ | Auto Expiry ✅</p>
+    <p><strong>Features:</strong> Live Data ✅ | Partial Fills ✅ | Auto Expiry ✅ | Batched Alerts ✅ | Critical Error Protection ✅</p>
     <p><a href="/health">Health Check</a></p>
     """
 
@@ -716,7 +925,7 @@ def health():
         "eth_min_profit": ETH_PARAMS['min_profit'],
         "btc_min_profit": BTC_PARAMS['min_profit'],
         "data_source": "delta_exchange_live_api",
-        "features": ["live_market_data", "partial_fill_handling", "auto_expiry_rollover"],
+        "features": ["live_market_data", "partial_fill_handling", "auto_expiry_rollover", "batched_telegram_alerts", "critical_error_protection"],
         "timestamp": get_ist_time()
     }
 
@@ -730,7 +939,7 @@ def start_ultra_fast_bots():
     print(f"🔵 ETH: ${ETH_PARAMS['min_profit']} min profit, ${ETH_PARAMS['price_increment']} increments")
     print(f"🟡 BTC: ${BTC_PARAMS['min_profit']} min profit, ${BTC_PARAMS['price_increment']} increments")
     print(f"⚡ Polling: Maximum Speed with LIVE Delta Exchange Data")
-    print(f"🔄 Features: Live Data + Partial Fills + Auto Expiry Rollover")
+    print(f"🔄 Features: Live Data + Partial Fills + Auto Expiry Rollover + Batched Alerts + Critical Error Protection")
     print(f"📝 Paper Trading: {PAPER_TRADING}")
     
     # Start bots in separate threads
@@ -740,7 +949,8 @@ def start_ultra_fast_bots():
     eth_thread.start()
     btc_thread.start()
     
-    send_telegram(f"🤖 Ultra-Fast Arbitrage Bot Started\n\n🔵 ETH: ${ETH_PARAMS['min_profit']} min profit\n🟡 BTC: ${BTC_PARAMS['min_profit']} min profit\n⚡ Polling: Maximum Speed\n📊 Data: LIVE Delta Exchange\n🔄 Partial Fills: Enabled\n📅 Auto Expiry: Enabled\n📝 Paper Trading: {PAPER_TRADING}")
+    # Send startup message (immediate)
+    send_telegram(f"🤖 Ultra-Fast Arbitrage Bot Started\n\n🔵 ETH: ${ETH_PARAMS['min_profit']} min profit\n🟡 BTC: ${BTC_PARAMS['min_profit']} min profit\n⚡ Polling: Maximum Speed\n📊 Data: LIVE Delta Exchange\n🔄 Partial Fills: Enabled\n📅 Auto Expiry: Enabled\n📝 Paper Trading: {PAPER_TRADING}\n⏰ Batched Alerts: Every 5 minutes\n🛑 Critical Error Protection: ENABLED", immediate=True)
 
 if __name__ == "__main__":
     start_ultra_fast_bots()
@@ -748,9 +958,13 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     print(f"🌐 Starting Flask server on port {port}")
     
-    app.run(
-        host='0.0.0.0',
-        port=port,
-        debug=False,
-        threaded=True
-    )
+    try:
+        app.run(
+            host='0.0.0.0',
+            port=port,
+            debug=False,
+            threaded=True
+        )
+    except Exception as e:
+        # If Flask server fails, trigger global shutdown
+        error_handler.global_exception_handler(type(e), e, e.__traceback__)
