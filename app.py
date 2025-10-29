@@ -28,6 +28,10 @@ BTC_PARAMS = {
     'price_increment': float(os.getenv("BTC_PRICE_INCREMENT", "1.00"))
 }
 
+# Delta Exchange India API Configuration
+DELTA_API_BASE = "https://api.india.delta.exchange/v2"
+DELTA_API_TIMEOUT = 5
+
 # ==================== UTILITIES ====================
 def get_ist_time():
     utc_now = datetime.now(timezone.utc)
@@ -96,13 +100,13 @@ class TimelineTracker:
             for step in self.timeline
         ])
 
-# ==================== EXPIRY MANAGEMENT ====================
+# ==================== FIXED EXPIRY MANAGEMENT ====================
 class ExpiryManager:
     def __init__(self):
         self.current_expiry = get_current_expiry()
         self.active_expiry = self.get_initial_active_expiry()
         self.last_expiry_check = 0
-        self.expiry_check_interval = 60  # Check every 60 seconds
+        self.expiry_check_interval = 60
     
     def get_initial_active_expiry(self):
         """Determine which expiry should be active right now"""
@@ -129,47 +133,65 @@ class ExpiryManager:
         return None
 
     def get_available_expiries(self, asset):
-        """Get all available expiries from Delta API"""
+        """Get all available expiries from Delta Exchange India API"""
         try:
-            url = "https://api.delta.exchange/v2/products"
+            url = f"{DELTA_API_BASE}/tickers"
             params = {
-                'contract_types': 'call_options,put_options',
-                'states': 'live'
+                'contract_types': 'call_options,put_options'
             }
             
-            response = requests.get(url, params=params, timeout=10)
+            response = requests.get(url, params=params, timeout=DELTA_API_TIMEOUT)
             
             if response.status_code == 200:
-                products = response.json().get('result', [])
-                expiries = set()
-                
-                for product in products:
-                    symbol = product.get('symbol', '')
-                    if asset in symbol:
-                        expiry = self.extract_expiry_from_symbol(symbol)
-                        if expiry:
-                            expiries.add(expiry)
-                
-                return sorted(expiries)
-            return []
+                data = response.json()
+                if data.get('success', False):
+                    tickers = data.get('result', [])
+                    expiries = set()
+                    
+                    print(f"[DEBUG] Found {len(tickers)} total option tickers")
+                    
+                    for ticker in tickers:
+                        symbol = ticker.get('symbol', '')
+                        
+                        # Filter for the specific asset
+                        if f'-{asset}-' in symbol:
+                            expiry = self.extract_expiry_from_symbol(symbol)
+                            if expiry:
+                                expiries.add(expiry)
+                                if len(expiries) <= 3:  # Log first few for debugging
+                                    print(f"[DEBUG] {asset} Symbol: {symbol} → Expiry: {expiry}")
+                    
+                    return sorted(expiries)
+                else:
+                    print(f"[ERROR] API returned success=false")
+                    return []
+            else:
+                print(f"[ERROR] API returned status: {response.status_code}")
+                return []
         except Exception as e:
             print(f"[{datetime.now()}] ❌ Error fetching {asset} expiries: {e}")
             return []
 
     def extract_expiry_from_symbol(self, symbol):
-        """Extract expiry date from symbol string"""
+        """FIXED: Extract expiry date from Delta Exchange symbol"""
         try:
+            # Delta Exchange format: C-BTC-90000-310125 or P-ETH-2500-310125
             parts = symbol.split('-')
             if len(parts) >= 4:
-                return parts[3]
+                expiry_code = parts[3]  # Expiry is at index 3
+                # Validate it's a 6-digit number (DDMMYY)
+                if len(expiry_code) == 6 and expiry_code.isdigit():
+                    return expiry_code
             return None
-        except:
+        except Exception as e:
+            print(f"[ERROR] Failed to extract expiry from {symbol}: {e}")
             return None
 
     def get_next_available_expiry(self, asset, current_expiry):
         """Get the next available expiry after current one"""
         available_expiries = self.get_available_expiries(asset)
         if not available_expiries:
+            print(f"[WARN] No available expiries found for {asset}")
             return current_expiry
         
         print(f"[{datetime.now()}] 📊 {asset}: Available expiries: {available_expiries}")
@@ -222,21 +244,21 @@ class ExpiryManager:
         
         return False
 
-# ==================== LIVE MARKET DATA ====================
+# ==================== FIXED LIVE MARKET DATA ====================
 class LiveMarketData:
     def __init__(self):
         self.expiry_manager = ExpiryManager()
         self.eth_prices = {}
         self.btc_prices = {}
         self.last_data_fetch = 0
-        self.data_fetch_interval = 2  # Fetch every 2 seconds
+        self.data_fetch_interval = 1  # 1 SECOND POLLING
+        self.debug_counter = 0
     
     def fetch_live_market_data(self, asset):
-        """Fetch REAL trading data from Delta Exchange"""
+        """FIXED: Fetch REAL trading data from Delta Exchange India API"""
         try:
             current_time = time.time()
             if current_time - self.last_data_fetch < self.data_fetch_interval:
-                # Return cached data if too soon
                 return self.eth_prices if asset == "ETH" else self.btc_prices
             
             self.last_data_fetch = current_time
@@ -245,68 +267,81 @@ class LiveMarketData:
             self.expiry_manager.check_and_update_expiry(asset)
             current_expiry = self.expiry_manager.active_expiry
             
-            # Fetch all products
-            url = "https://api.delta.exchange/v2/products"
+            # SINGLE API CALL for all tickers (EFFICIENT)
+            url = f"{DELTA_API_BASE}/tickers"
             params = {
-                'contract_types': 'call_options,put_options',
-                'states': 'live'
+                'contract_types': 'call_options,put_options'
             }
             
-            response = requests.get(url, params=params, timeout=10)
+            response = requests.get(url, params=params, timeout=DELTA_API_TIMEOUT)
             
             if response.status_code == 200:
-                products = response.json().get('result', [])
-                market_data = {}
-                
-                for product in products:
-                    symbol = product.get('symbol', '')
+                data = response.json()
+                if data.get('success', False):
+                    tickers = data.get('result', [])
+                    market_data = {}
                     
-                    # Filter for current asset and expiry
-                    if asset in symbol and current_expiry in symbol:
-                        product_id = product.get('id')
+                    print(f"[DEBUG] Processing {len(tickers)} total option tickers for {asset}")
+                    
+                    for ticker in tickers:
+                        symbol = ticker.get('symbol', '')
                         
-                        # Fetch ticker data for current prices
-                        ticker_url = f"https://api.delta.exchange/v2/tickers"
-                        ticker_params = {'symbol': symbol}
-                        
-                        ticker_response = requests.get(ticker_url, params=ticker_params, timeout=10)
-                        
-                        if ticker_response.status_code == 200:
-                            ticker_data = ticker_response.json()
-                            if ticker_data.get('result'):
-                                ticker = ticker_data['result'][0]
-                                quotes = ticker.get('quotes', {})
+                        # FIXED: Proper symbol filtering for Delta Exchange
+                        if (f'-{asset}-' in symbol and current_expiry in symbol and 
+                            (symbol.startswith('C-') or symbol.startswith('P-'))):
+                            
+                            quotes = ticker.get('quotes', {})
+                            bid_price = float(quotes.get('best_bid', 0)) if quotes.get('best_bid') else 0
+                            ask_price = float(quotes.get('best_ask', 0)) if quotes.get('best_ask') else 0
+                            
+                            # Only include options with valid prices
+                            if bid_price > 0 and ask_price > 0:
+                                market_data[symbol] = {
+                                    'symbol': symbol,
+                                    'bid': bid_price,
+                                    'ask': ask_price,
+                                    'qty': 50,  # Default quantity
+                                    'strike': self.extract_strike_from_symbol(symbol),
+                                    'option_type': 'call' if symbol.startswith('C-') else 'put'
+                                }
                                 
-                                bid_price = float(quotes.get('best_bid', 0))
-                                ask_price = float(quotes.get('best_ask', 0))
-                                
-                                # Only include options with valid prices
-                                if bid_price > 0 and ask_price > 0:
-                                    market_data[symbol] = {
-                                        'symbol': symbol,
-                                        'bid': bid_price,
-                                        'ask': ask_price,
-                                        'qty': 50  # Default quantity for paper trading
-                                    }
-                                    print(f"📊 {asset}: {symbol} - Bid: ${bid_price:.2f}, Ask: ${ask_price:.2f}")
-                
-                # Update cache
-                if asset == "ETH":
-                    self.eth_prices = market_data
+                                # Debug logging
+                                self.debug_counter += 1
+                                if self.debug_counter % 100 == 0:
+                                    print(f"📊 {asset}: {symbol} | Strike: {market_data[symbol]['strike']} | Bid: ${bid_price:.2f}, Ask: ${ask_price:.2f}")
+                    
+                    # Update cache
+                    if asset == "ETH":
+                        self.eth_prices = market_data
+                    else:
+                        self.btc_prices = market_data
+                    
+                    print(f"✅ {asset}: Fetched {len(market_data)} live options for expiry {current_expiry}")
+                    return market_data
                 else:
-                    self.btc_prices = market_data
-                
-                print(f"✅ {asset}: Fetched {len(market_data)} live options for expiry {current_expiry}")
-                return market_data
+                    print(f"❌ {asset}: API returned success=false")
+                    return {}
             else:
                 print(f"❌ {asset}: API Error {response.status_code}")
                 return {}
                 
         except Exception as e:
             print(f"❌ {asset}: Error fetching live data: {e}")
-            return self.eth_prices if asset == "ETH" else self.btc_prices  # Return cached data on error
+            return self.eth_prices if asset == "ETH" else self.btc_prices
 
-# ==================== ARBITRAGE ENGINE ====================
+    def extract_strike_from_symbol(self, symbol):
+        """FIXED: Extract strike price from Delta Exchange symbol"""
+        try:
+            # Delta Exchange format: C-BTC-90000-310125 or P-ETH-2500-310125
+            parts = symbol.split('-')
+            if len(parts) >= 3:
+                return int(parts[2])  # Strike is at index 2
+            return 0
+        except Exception as e:
+            print(f"[ERROR] Failed to extract strike from {symbol}: {e}")
+            return 0
+
+# ==================== FIXED ARBITRAGE ENGINE ====================
 class UltraFastArbitrageEngine:
     def __init__(self):
         self.market_data = LiveMarketData()
@@ -316,7 +351,7 @@ class UltraFastArbitrageEngine:
         return self.market_data.fetch_live_market_data(asset)
     
     def find_arbitrage_opportunities(self, asset, options_data):
-        """Ultra-fast arbitrage detection with REAL data"""
+        """Ultra-fast arbitrage detection with PROPER Delta Exchange data"""
         if not options_data:
             return []
             
@@ -346,6 +381,10 @@ class UltraFastArbitrageEngine:
     def check_call_arbitrage(self, asset, strikes, strike1, strike2):
         asset_params = ETH_PARAMS if asset == "ETH" else BTC_PARAMS
         
+        # Check if both strikes have call data
+        if 'call' not in strikes[strike1] or 'call' not in strikes[strike2]:
+            return None
+            
         call1_ask = strikes[strike1]['call'].get('ask', 0)
         call2_bid = strikes[strike2]['call'].get('bid', 0)
         
@@ -372,6 +411,10 @@ class UltraFastArbitrageEngine:
     def check_put_arbitrage(self, asset, strikes, strike1, strike2):
         asset_params = ETH_PARAMS if asset == "ETH" else BTC_PARAMS
         
+        # Check if both strikes have put data
+        if 'put' not in strikes[strike1] or 'put' not in strikes[strike2]:
+            return None
+            
         put1_bid = strikes[strike1]['put'].get('bid', 0)
         put2_ask = strikes[strike2]['put'].get('ask', 0)
         
@@ -396,30 +439,22 @@ class UltraFastArbitrageEngine:
         return None
     
     def group_options_by_strike(self, options_data):
+        """FIXED: Group options by strike with proper Delta Exchange parsing"""
         strikes = {}
         for symbol, data in options_data.items():
-            strike = self.extract_strike(symbol)
+            strike = data.get('strike', 0)  # Use pre-extracted strike
             if strike > 0:
                 if strike not in strikes:
                     strikes[strike] = {'call': {}, 'put': {}}
                 
-                if 'C-' in symbol:
+                option_type = data.get('option_type', 'unknown')
+                if option_type == 'call':
                     strikes[strike]['call'] = data
-                elif 'P-' in symbol:
+                elif option_type == 'put':
                     strikes[strike]['put'] = data
         return strikes
-    
-    def extract_strike(self, symbol):
-        try:
-            parts = symbol.split('-')
-            for part in parts:
-                if part.isdigit() and len(part) > 2:
-                    return int(part)
-            return 0
-        except:
-            return 0
 
-# ==================== ORDER EXECUTION WITH PARTIAL FILLS ====================
+# ==================== ORDER EXECUTION (UNCHANGED) ====================
 class UltraFastOrderExecutor:
     def __init__(self):
         self.active_trades = {}
@@ -646,7 +681,7 @@ class UltraFastOrderExecutor:
 """
         send_telegram(message)
 
-# ==================== ULTRA-FAST BOTS ====================
+# ==================== ULTRA-FAST BOTS WITH 1-SECOND POLLING ====================
 class UltraFastAPIBot:
     def __init__(self, asset):
         self.asset = asset
@@ -655,55 +690,73 @@ class UltraFastAPIBot:
         self.running = True
         self.cycle_count = 0
         self.start_time = time.time()
+        self.last_opportunity_log = 0
     
     def ultra_fast_monitoring(self):
-        """Ultra-fast monitoring loop with LIVE market data"""
-        print(f"🚀 Starting Ultra-Fast {self.asset} Bot with LIVE Data")
+        """Ultra-fast monitoring loop with 1-SECOND POLLING"""
+        print(f"🚀 Starting Ultra-Fast {self.asset} Bot with 1-SECOND POLLING")
         
         while self.running:
             cycle_start = time.time()
             self.cycle_count += 1
             
             try:
-                # 1. Fetch LIVE market data
+                # 1. Fetch LIVE market data with proper Delta Exchange India API
                 data = self.arbitrage_engine.fetch_data(self.asset)
                 
-                # 2. Find opportunities with REAL data
+                # 2. Find opportunities with PROPER data
                 opportunities = self.arbitrage_engine.find_arbitrage_opportunities(self.asset, data)
                 
                 # 3. Execute immediately if opportunities found
                 if opportunities:
-                    print(f"🎯 {self.asset}: Found {len(opportunities)} opportunities")
+                    current_time = time.time()
+                    if current_time - self.last_opportunity_log >= 5:  # Log every 5 seconds max
+                        print(f"🎯 {self.asset}: Found {len(opportunities)} opportunities")
+                        for opp in opportunities[:2]:  # Log top 2
+                            print(f"💰 {self.asset} Opportunity: {opp['type']} {opp['strike1']}→{opp['strike2']} Profit: ${opp['profit']:.2f}")
+                        self.last_opportunity_log = current_time
+                    
+                    # Execute the best opportunity
                     self.order_executor.execute_arbitrage_trade(self.asset, opportunities[0])
                 
-                # 4. Log speed every 100 cycles
-                if self.cycle_count % 100 == 0:
+                # 4. Enhanced logging with performance metrics
+                if self.cycle_count % 30 == 0:  # Log every 30 cycles (~30 seconds)
                     elapsed = time.time() - self.start_time
                     cycles_per_second = self.cycle_count / elapsed
                     current_expiry = self.arbitrage_engine.market_data.expiry_manager.active_expiry
                     data_count = len(data)
                     print(f"⚡ {self.asset}: {cycles_per_second:.1f} cycles/sec | Expiry: {current_expiry} | Options: {data_count}")
+                    
+                    # Debug: Show sample data
+                    if data:
+                        sample_symbols = list(data.keys())[:2]
+                        print(f"[DEBUG] {self.asset} Sample symbols: {sample_symbols}")
                 
-                # 5. No sleep - immediate next cycle
+                # 5. Precise 1-second timing control
                 elapsed_cycle = time.time() - cycle_start
-                if elapsed_cycle < 0.1:  # If cycle too fast
-                    time.sleep(0.05)  # 50ms tiny pause
+                sleep_time = max(0.0, 1.0 - elapsed_cycle)  # Exactly 1 second between cycles
+                
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                else:
+                    print(f"⚠️ {self.asset}: Cycle took {elapsed_cycle:.2f}s (too slow)")
                     
             except Exception as e:
                 print(f"❌ {self.asset} Bot error: {e}")
-                time.sleep(0.5)  # Brief pause on error
+                time.sleep(1)  # 1 second pause on error
 
 # ==================== FLASK ROUTES ====================
 @app.route('/')
 def home():
     return f"""
     <h1>🚀 Ultra-Fast Crypto Arbitrage Bot</h1>
-    <p><strong>Status:</strong> Running - LIVE Market Data</p>
+    <p><strong>Status:</strong> Running - Delta Exchange India API</p>
     <p><strong>Paper Trading:</strong> {PAPER_TRADING}</p>
+    <p><strong>Polling Rate:</strong> 1 SECOND</p>
     <p><strong>ETH:</strong> ${ETH_PARAMS['min_profit']} min profit</p>
     <p><strong>BTC:</strong> ${BTC_PARAMS['min_profit']} min profit</p>
-    <p><strong>Data Source:</strong> Delta Exchange LIVE API</p>
-    <p><strong>Features:</strong> Live Data ✅ | Partial Fills ✅ | Auto Expiry ✅</p>
+    <p><strong>Data Source:</strong> Delta Exchange India API (FIXED)</p>
+    <p><strong>Features:</strong> 1-Second Polling ✅ | Live Data ✅ | Partial Fills ✅ | Auto Expiry ✅</p>
     <p><a href="/health">Health Check</a></p>
     """
 
@@ -711,12 +764,14 @@ def home():
 def health():
     return {
         "status": "healthy",
-        "mode": "ultra_fast_live_data",
+        "mode": "ultra_fast_1_second_polling",
         "paper_trading": PAPER_TRADING,
+        "polling_rate": "1_second",
         "eth_min_profit": ETH_PARAMS['min_profit'],
         "btc_min_profit": BTC_PARAMS['min_profit'],
-        "data_source": "delta_exchange_live_api",
-        "features": ["live_market_data", "partial_fill_handling", "auto_expiry_rollover"],
+        "data_source": "delta_exchange_india_api",
+        "api_base": DELTA_API_BASE,
+        "features": ["1_second_polling", "live_market_data", "partial_fill_handling", "auto_expiry_rollover"],
         "timestamp": get_ist_time()
     }
 
@@ -725,12 +780,13 @@ eth_bot = UltraFastAPIBot("ETH")
 btc_bot = UltraFastAPIBot("BTC")
 
 def start_ultra_fast_bots():
-    """Start both bots with LIVE market data"""
-    print("🚀 Starting Ultra-Fast Crypto Arbitrage Bot with LIVE Data...")
+    """Start both bots with 1-SECOND POLLING"""
+    print("🚀 Starting Ultra-Fast Crypto Arbitrage Bot with 1-SECOND POLLING...")
     print(f"🔵 ETH: ${ETH_PARAMS['min_profit']} min profit, ${ETH_PARAMS['price_increment']} increments")
     print(f"🟡 BTC: ${BTC_PARAMS['min_profit']} min profit, ${BTC_PARAMS['price_increment']} increments")
-    print(f"⚡ Polling: Maximum Speed with LIVE Delta Exchange Data")
-    print(f"🔄 Features: Live Data + Partial Fills + Auto Expiry Rollover")
+    print(f"⚡ Polling: 1 SECOND intervals")
+    print(f"🌐 API: Delta Exchange India (FIXED)")
+    print(f"🔄 Features: 1-Second Polling + Live Data + Partial Fills + Auto Expiry")
     print(f"📝 Paper Trading: {PAPER_TRADING}")
     
     # Start bots in separate threads
@@ -740,7 +796,7 @@ def start_ultra_fast_bots():
     eth_thread.start()
     btc_thread.start()
     
-    send_telegram(f"🤖 Ultra-Fast Arbitrage Bot Started\n\n🔵 ETH: ${ETH_PARAMS['min_profit']} min profit\n🟡 BTC: ${BTC_PARAMS['min_profit']} min profit\n⚡ Polling: Maximum Speed\n📊 Data: LIVE Delta Exchange\n🔄 Partial Fills: Enabled\n📅 Auto Expiry: Enabled\n📝 Paper Trading: {PAPER_TRADING}")
+    send_telegram(f"🤖 Ultra-Fast Arbitrage Bot Started\n\n🔵 ETH: ${ETH_PARAMS['min_profit']} min profit\n🟡 BTC: ${BTC_PARAMS['min_profit']} min profit\n⚡ Polling: 1 SECOND intervals\n📊 Data: Delta Exchange India API\n🔄 Partial Fills: Enabled\n📅 Auto Expiry: Enabled\n⏰ Started: {get_ist_time()} IST\n📝 Paper Trading: {PAPER_TRADING}")
 
 if __name__ == "__main__":
     start_ultra_fast_bots()
@@ -754,4 +810,3 @@ if __name__ == "__main__":
         debug=False,
         threaded=True
     )
-
