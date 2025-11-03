@@ -450,75 +450,96 @@ class UltraFastOrderExecutor:
         self.active_trades = {}
     
     def execute_sell_with_partial_fill(self, symbol, price, quantity, asset):
-        """Execute sell order with 5-second timeout"""
+        """Execute sell order with immediate fill check and 5-second timeout"""
         timeline = TimelineTracker()
         
         if PAPER_TRADING:
             timeline.add_step(f"SELL ORDER PLACED: {quantity} lots @ ${price:.2f}", "📝")
             
-            # Wait 5 seconds for fill
-            for i in range(5):
+            # Check for immediate fill
+            immediate_fill = random.choices([True, False], weights=[0.3, 0.7])[0]
+            if immediate_fill:
+                timeline.add_step(f"SELL ORDER IMMEDIATELY FILLED: {quantity} lots @ ${price:.2f}", "✅")
+                return quantity, timeline
+            
+            # If not immediately filled, wait 5 seconds with periodic checks
+            timeline.add_step("SELL ORDER NOT FILLED - Waiting 5 seconds...", "⏳")
+            
+            for second in range(5):
                 time.sleep(1)
-                timeline.add_step(f"Waiting for fill... {i+1}/5 seconds", "⏳")
+                # Check for fill each second
+                filled = random.choices([True, False], weights=[0.2, 0.8])[0]
+                if filled:
+                    filled_qty = random.choices(
+                        [quantity, quantity-1, quantity-2],
+                        weights=[0.7, 0.2, 0.1]
+                    )[0]
+                    
+                    if filled_qty == quantity:
+                        timeline.add_step(f"SELL ORDER FILLED after {second+1} seconds: {filled_qty} lots @ ${price:.2f}", "✅")
+                    else:
+                        timeline.add_step(f"SELL PARTIAL FILL after {second+1} seconds: {filled_qty}/{quantity} lots @ ${price:.2f}", "✅")
+                    
+                    return filled_qty, timeline
             
-            # After 5 seconds, check if filled
-            filled_qty = random.choices(
-                [0, quantity, quantity-1, quantity-2],
-                weights=[0.4, 0.4, 0.1, 0.1]
-            )[0]
-            
-            if filled_qty == 0:
-                timeline.add_step(f"SELL ORDER CANCELLED - No fill after 5 seconds", "❌")
-                return 0, timeline
-            elif filled_qty == quantity:
-                timeline.add_step(f"SELL ORDER FILLED: {filled_qty} lots @ ${price:.2f}", "✅")
-            else:
-                timeline.add_step(f"SELL PARTIAL FILL: {filled_qty}/{quantity} lots @ ${price:.2f}", "✅")
-                timeline.add_step(f"SELL REMAINING: {quantity-filled_qty} lots CANCELLED", "❌")
-            
-            return filled_qty, timeline
+            # After 5 seconds, if still not filled
+            timeline.add_step(f"SELL ORDER CANCELLED - No fill after 5 seconds", "❌")
+            return 0, timeline
         
         return quantity, timeline
     
     def execute_buy_sequence(self, symbol, original_price, sell_price, quantity, asset):
-        """Execute buy with 2-second intervals and price adjustments"""
+        """Execute buy with 2-second intervals and progressive price adjustments"""
         timeline = TimelineTracker()
         asset_params = ETH_PARAMS if asset == "ETH" else BTC_PARAMS
         
         current_price = original_price
+        buy_success = False
+        final_price = original_price
+        
+        # Step 1: Try at original price for 2 seconds
         timeline.add_step(f"BUY ORDER PLACED: {quantity} lots @ ${current_price:.2f}", "📝")
         
         if PAPER_TRADING:
-            # Step 1: Wait 2 seconds at original price
-            time.sleep(2)
-            timeline.add_step(f"Waiting for fill... 2/2 seconds @ ${current_price:.2f}", "⏳")
-            
-            first_fill = random.choices([True, False], weights=[0.3, 0.7])[0]
-            if first_fill:
-                timeline.add_step(f"BUY ORDER FILLED: {quantity} lots @ ${current_price:.2f}", "✅")
+            # Check for immediate fill
+            immediate_fill = random.choices([True, False], weights=[0.2, 0.8])[0]
+            if immediate_fill:
+                timeline.add_step(f"BUY ORDER IMMEDIATELY FILLED: {quantity} lots @ ${current_price:.2f}", "✅")
                 return True, current_price, timeline
+            
+            # Wait 2 seconds at original price
+            for second in range(2):
+                time.sleep(1)
+                fill_check = random.choices([True, False], weights=[0.1, 0.9])[0]
+                if fill_check:
+                    timeline.add_step(f"BUY ORDER FILLED after {second+1} seconds @ ${current_price:.2f}", "✅")
+                    return True, current_price, timeline
+            
+            timeline.add_step(f"BUY NOT FILLED in 2 seconds @ ${current_price:.2f}", "⏳")
             
             # Step 2: Increase price by increment and wait 2 seconds
             current_price += asset_params['price_increment']
             timeline.add_step(f"BUY PRICE INCREASED: ${current_price:.2f} (+${asset_params['price_increment']:.2f})", "🔄")
-            time.sleep(2)
-            timeline.add_step(f"Waiting for fill... 2/2 seconds @ ${current_price:.2f}", "⏳")
             
-            second_fill = random.choices([True, False], weights=[0.5, 0.5])[0]
-            if second_fill:
-                timeline.add_step(f"BUY ORDER FILLED: {quantity} lots @ ${current_price:.2f}", "✅")
-                return True, current_price, timeline
+            for second in range(2):
+                time.sleep(1)
+                fill_check = random.choices([True, False], weights=[0.3, 0.7])[0]
+                if fill_check:
+                    timeline.add_step(f"BUY ORDER FILLED after {second+1} seconds @ ${current_price:.2f}", "✅")
+                    return True, current_price, timeline
+            
+            timeline.add_step(f"BUY NOT FILLED in 2 seconds @ ${current_price:.2f}", "⏳")
             
             # Step 3: Increase price to match sell price and wait 2 seconds
             current_price = sell_price
             timeline.add_step(f"BUY PRICE MATCHED: ${current_price:.2f} (equal to sell)", "🚀")
-            time.sleep(2)
-            timeline.add_step(f"Waiting for fill... 2/2 seconds @ ${current_price:.2f}", "⏳")
             
-            third_fill = random.choices([True, False], weights=[0.7, 0.3])[0]
-            if third_fill:
-                timeline.add_step(f"BUY ORDER FILLED: {quantity} lots @ ${current_price:.2f}", "✅")
-                return True, current_price, timeline
+            for second in range(2):
+                time.sleep(1)
+                fill_check = random.choices([True, False], weights=[0.5, 0.5])[0]
+                if fill_check:
+                    timeline.add_step(f"BUY ORDER FILLED after {second+1} seconds @ ${current_price:.2f}", "✅")
+                    return True, current_price, timeline
             
             # Step 4: Manual intervention needed
             timeline.add_step(f"BUY ORDER FAILED - MANUAL INTERVENTION REQUIRED", "🚨")
@@ -527,69 +548,102 @@ class UltraFastOrderExecutor:
         return True, original_price, timeline
 
     def execute_arbitrage_trade(self, asset, opportunity):
-        """Complete trade execution with single Telegram message"""
+        """Complete trade execution with continuous trading for same opportunity"""
         try:
-            trade_qty = min(
-                opportunity['buy_qty'], 
-                opportunity['sell_qty'], 
-                MAX_LOTS_PER_TRADE
+            # Calculate maximum tradable quantity (min of 100, buy_qty, sell_qty)
+            max_tradable_qty = min(
+                MAX_LOTS_PER_TRADE,
+                opportunity['buy_qty'],
+                opportunity['sell_qty']
             )
             
-            if trade_qty < 1:
+            if max_tradable_qty < 1:
                 return False
             
             emoji = "🔵" if asset == "ETH" else "🟡"
             asset_params = ETH_PARAMS if asset == "ETH" else BTC_PARAMS
             
-            combined_timeline = TimelineTracker()
-            combined_timeline.add_step(f"STARTING {asset} {opportunity['type']} ARBITRAGE", "🚀")
-            combined_timeline.add_step(f"Strike: {opportunity['strike1']} → {opportunity['strike2']}", "🎯")
-            combined_timeline.add_step(f"Expected Profit: ${opportunity['profit']:.2f}", "💰")
+            # Execute multiple trades until no quantity left
+            total_filled_qty = 0
+            total_profit = 0
+            trade_count = 0
             
-            # Execute sell order with 5-second timeout
-            filled_qty, sell_timeline = self.execute_sell_with_partial_fill(
-                opportunity['sell_symbol'], 
-                opportunity['sell_premium'], 
-                trade_qty, 
-                asset
-            )
+            while max_tradable_qty > 0:
+                trade_count += 1
+                # Calculate quantity for this trade (max 100 per trade)
+                trade_qty = min(100, max_tradable_qty)
+                
+                combined_timeline = TimelineTracker()
+                combined_timeline.add_step(f"TRADE {trade_count}: Starting {asset} {opportunity['type']} ARBITRAGE", "🚀")
+                combined_timeline.add_step(f"Strike: {opportunity['strike1']} → {opportunity['strike2']}", "🎯")
+                combined_timeline.add_step(f"Quantity: {trade_qty} lots | Expected Profit: ${opportunity['profit']:.2f}", "💰")
+                
+                # Execute sell order
+                filled_qty, sell_timeline = self.execute_sell_with_partial_fill(
+                    opportunity['sell_symbol'], 
+                    opportunity['sell_premium'], 
+                    trade_qty, 
+                    asset
+                )
+                
+                combined_timeline.timeline.extend(sell_timeline.timeline)
+                
+                if filled_qty == 0:
+                    combined_timeline.add_step("SELL ORDER CANCELLED - Moving to next opportunity", "⏭️")
+                    self.send_complete_order_message(asset, opportunity, trade_qty, 0, 0, combined_timeline, emoji, "SELL_TIMEOUT")
+                    break
+                
+                if filled_qty < trade_qty:
+                    combined_timeline.add_step(f"PARTIAL FILL: Adjusting buy to {filled_qty} lots", "🔄")
+                
+                # Execute buy sequence
+                buy_success, final_price, buy_timeline = self.execute_buy_sequence(
+                    opportunity['buy_symbol'],
+                    opportunity['buy_premium'],
+                    opportunity['sell_premium'],
+                    filled_qty,
+                    asset
+                )
+                
+                combined_timeline.timeline.extend(buy_timeline.timeline)
+                
+                if buy_success:
+                    profit = opportunity['sell_premium'] - final_price
+                    trade_pnl = profit * filled_qty
+                    total_profit += trade_pnl
+                    total_filled_qty += filled_qty
+                    
+                    status = "EXECUTED" if profit > 0 else "BREAK_EVEN"
+                    combined_timeline.add_step(f"TRADE {trade_count} COMPLETED: Profit ${profit:.2f} per lot | Total: ${trade_pnl:.2f}", "💰")
+                    
+                    # Update remaining quantity
+                    max_tradable_qty -= filled_qty
+                    
+                    # If same opportunity still exists and we have quantity left, continue
+                    if max_tradable_qty > 0:
+                        combined_timeline.add_step(f"CONTINUING: {max_tradable_qty} lots remaining in this opportunity", "🔄")
+                        continue
+                    else:
+                        combined_timeline.add_step("ALL QUANTITY EXECUTED for this opportunity", "✅")
+                        break
+                else:
+                    combined_timeline.add_step(f"TRADE {trade_count} FAILED - Manual intervention needed", "🚨")
+                    self.send_complete_order_message(
+                        asset, opportunity, trade_qty, filled_qty, final_price, 
+                        combined_timeline, emoji, "MANUAL_INTERVENTION_NEEDED"
+                    )
+                    break
             
-            combined_timeline.timeline.extend(sell_timeline.timeline)
+            # Send final summary if we executed any trades
+            if total_filled_qty > 0:
+                self.send_complete_order_message(
+                    asset, opportunity, total_filled_qty, total_filled_qty, final_price,
+                    combined_timeline, emoji, "EXECUTED", 
+                    total_profit/total_filled_qty if total_filled_qty > 0 else 0, 
+                    total_profit, True
+                )
             
-            if filled_qty == 0:
-                combined_timeline.add_step("SELL ORDER CANCELLED - Moving to next opportunity", "⏭️")
-                self.send_complete_order_message(asset, opportunity, 0, 0, 0, combined_timeline, emoji, "SELL_TIMEOUT")
-                return False
-            
-            if filled_qty < trade_qty:
-                combined_timeline.add_step(f"PARTIAL FILL: Adjusting buy to {filled_qty} lots", "🔄")
-            
-            # Execute buy sequence
-            buy_success, final_price, buy_timeline = self.execute_buy_sequence(
-                opportunity['buy_symbol'],
-                opportunity['buy_premium'],
-                opportunity['sell_premium'],
-                filled_qty,
-                asset
-            )
-            
-            combined_timeline.timeline.extend(buy_timeline.timeline)
-            
-            if buy_success:
-                profit = opportunity['sell_premium'] - final_price
-                total_pnl = profit * filled_qty
-                status = "EXECUTED" if profit > 0 else "BREAK_EVEN"
-            else:
-                profit = 0
-                total_pnl = 0
-                status = "MANUAL_INTERVENTION_NEEDED"
-            
-            self.send_complete_order_message(
-                asset, opportunity, trade_qty, filled_qty, final_price, 
-                combined_timeline, emoji, status, profit, total_pnl, buy_success
-            )
-            
-            return buy_success
+            return total_filled_qty > 0
             
         except Exception as e:
             error_msg = f"🚨 {asset} TRADE ERROR: {str(e)}"
